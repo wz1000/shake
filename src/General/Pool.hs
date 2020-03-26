@@ -107,9 +107,24 @@ step pool@(Pool _ done) op = mask_ $ withPool_ pool $ \s -> do
 -- | Add a new task to the pool. See the top of the module for the relative ordering
 --   and semantics.
 addPool :: PoolPriority -> Pool -> IO a -> IO ()
-addPool priority pool act = step pool $ \s -> do
+addPool _priority pool@(Pool _ done) act = withPool_ pool $ \s -> do
+  t <- newThreadFinally act $ \t res -> case res of
+    Left e -> withPool_ pool $ \s -> do
+      signalBarrier done $ Left e
+      pure (remThread t s){alive = False}
+    Right _ -> withPool_ pool $ \s -> do
+      let s' = (remThread t s)
+      when (threadsCount s' == 0) $
+        signalBarrier done $ Right s'
+      pure s'
+  pure (addThread t s)
+  where
+      addThread t s = s{threads = Set.insert t $ threads s, threadsCount = threadsCount s + 1
+                       ,threadsSum = threadsSum s + 1, threadsMax = threadsMax s `max` (threadsCount s + 1)}
+      remThread t s = s{threads = Set.delete t $ threads s, threadsCount = threadsCount s - 1}
+  {-step pool $ \s -> do
     i <- rand s
-    pure s{todo = Heap.insert (Heap.Entry (priority, i) $ void act) $ todo s}
+    pure s{todo = Heap.insert (Heap.Entry (priority, i) $ void act) $ todo s}-}
 
 
 data PoolPriority
@@ -123,9 +138,10 @@ data PoolPriority
 -- | Temporarily increase the pool by 1 thread. Call the cleanup action to restore the value.
 --   After calling cleanup you should requeue onto a new thread.
 increasePool :: Pool -> IO (IO ())
-increasePool pool = do
+increasePool pool = pure (pure ()) {-do
     step pool $ \s -> pure s{threadsLimit = threadsLimit s + 1}
     pure $ step pool $ \s -> pure s{threadsLimit = threadsLimit s - 1}
+    -}
 
 
 -- | Make sure the pool cannot run out of tasks (and thus everything finishes) until after the cancel is called.
@@ -138,7 +154,6 @@ keepAlivePool pool = do
         waitBarrier bar
         cancel
     pure $ signalBarrier bar ()
-
 
 -- | Run all the tasks in the pool on the given number of works.
 --   If any thread throws an exception, the exception will be reraised.
